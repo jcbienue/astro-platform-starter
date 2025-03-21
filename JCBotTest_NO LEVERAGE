@@ -1,0 +1,137 @@
+
+import os
+import math
+from binance.client import Client
+from binance.enums import *
+from binance.exceptions import BinanceAPIException
+import time
+
+# Binance API credentials (set in environment variables or directly here)
+API_KEY = 'Lc4cWwugpGeO8FY839EuFbsxGoVs8AdPj941BeI4xaEBlVl5bHk3kXvucHllTqTO'
+API_SECRET = 'y7yo9NWcxd3q4s3fSuJGnAr3GJummapaT8iXeg58k6ryzQIPmw1JvXcSdyXBgRtv'
+
+# Initialize the Binance client
+client = Client(API_KEY, API_SECRET)
+
+# Function to get available futures symbols
+def get_available_symbols():
+    exchange_info = client.futures_exchange_info()
+    symbols = []
+    for s in exchange_info['symbols']:
+        if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING':
+            symbols.append(s['symbol'])
+    return symbols
+
+# Function to get precision of the symbol
+def get_symbol_precision(symbol):
+    exchange_info = client.futures_exchange_info()
+    for s in exchange_info['symbols']:
+        if s['symbol'] == symbol:
+            for filter in s['filters']:
+                if filter['filterType'] == 'LOT_SIZE':
+                    return int(filter['stepSize'].find('1') - 1)
+    return 0  # Default precision if not found
+
+# Function to get the price of the selected symbol
+def get_symbol_price(symbol):
+    avg_price = client.futures_symbol_ticker(symbol=symbol)
+    return float(avg_price['price'])
+
+# Function to place the buy order with correct precision
+def place_buy_order(symbol, amount, price):
+    # Get the precision for the symbol
+    precision = get_symbol_precision(symbol)
+    
+    # Calculate the quantity to buy based on the amount in USD
+    quantity = amount / price
+    
+    # Round the quantity to the symbol's precision
+    quantity = round(quantity, precision)
+    
+    # Ensure the quantity is valid (not zero)
+    if quantity <= 0:
+        print("Invalid quantity")
+        return
+    
+    # Create a futures buy order
+    try:
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=SIDE_BUY,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        print(f"Placed buy order: {order}")
+        return order
+    except BinanceAPIException as e:
+        print(f"Error placing order: {e}")
+
+# Monitor market and execute margin calls or take profit
+def monitor_market(symbol):
+    # Fetch the initial price for the symbol
+    initial_price = get_symbol_price(symbol)
+    
+    # Set buy amount and take profit percentage
+    BUY_AMOUNTS = [50, 75, 100]  # Fixed USD amounts to buy at different levels
+    TAKE_PROFIT_PERCENTAGE = 0.02  # 2% Take profit
+    
+    print(f"Initial price: {initial_price}")
+
+    # Place initial buy order
+    buy_amount = BUY_AMOUNTS[0]  # $50 for the first buy
+    place_buy_order(symbol, buy_amount, initial_price)
+
+    # Track the buy orders and perform margin calls
+    order_prices = [initial_price]
+    buy_count = 0
+    
+    while True:
+        time.sleep(10)  # Check every 10 seconds
+
+        # Get the latest price
+        current_price = get_symbol_price(symbol)
+        print(f"Current price: {current_price}")
+        
+        # Check if the current price has increased by 2% from the last buy price
+        for i in range(buy_count):
+            take_profit_price = order_prices[i] * (1 + TAKE_PROFIT_PERCENTAGE)
+            if current_price >= take_profit_price:
+                print(f"Take profit hit for order {i + 1}: Selling at {current_price}")
+                try:
+                    order = client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_SELL,
+                        type=ORDER_TYPE_MARKET,
+                        quantity=BUY_AMOUNTS[i] / order_prices[i]  # Selling at the same quantity as the original buy order
+                    )
+                    print(f"Sold at {current_price}: {order}")
+                except BinanceAPIException as e:
+                    print(f"Error selling order {i + 1}: {e}")
+                order_prices[i] = None  # Mark this order as sold
+
+        # Execute margin call if price drops by 2%, 4%, 6% (add additional buys)
+        if current_price <= order_prices[-1] * 0.98 and buy_count < len(BUY_AMOUNTS):
+            # Buy more based on the next drop level
+            buy_count += 1
+            buy_amount = BUY_AMOUNTS[buy_count]
+            print(f"Price dropped, placing buy order {buy_count + 1} for ${buy_amount}")
+            place_buy_order(symbol, buy_amount, current_price)
+            order_prices.append(current_price)
+
+# Get user symbol choice
+def get_user_symbol_choice(symbols):
+    print("Available trading pairs:")
+    for idx, symbol in enumerate(symbols, 1):
+        print(f"{idx}. {symbol}")
+    
+    choice = int(input("Select a symbol to trade (enter the number): "))
+    selected_symbol = symbols[choice - 1]
+    return selected_symbol
+
+# Main execution
+if __name__ == "__main__":
+    available_symbols = get_available_symbols()
+    symbol = get_user_symbol_choice(available_symbols)
+
+    # Start monitoring the market for the selected symbol
+    monitor_market(symbol)
