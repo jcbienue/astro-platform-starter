@@ -1,0 +1,161 @@
+import os
+import time
+from binance.client import Client
+from binance.enums import *
+from binance.exceptions import BinanceAPIException
+
+# Binance API credentials (Set in environment variables for security)
+API_KEY = 'Lc4cWwugpGeO8FY839EuFbsxGoVs8AdPj941BeI4xaEBlVl5bHk3kXvucHllTqTO'
+API_SECRET = 'y7yo9NWcxd3q4s3fSuJGnAr3GJummapaT8iXeg58k6ryzQIPmw1JvXcSdyXBgRtv'
+
+# Initialize Binance client
+client = Client(API_KEY, API_SECRET)
+
+# 🚀 User-defined parameters
+LEVERAGE = 10  # Fixed leverage (10x)
+FIRST_BUY_AMOUNT = 2.1  # First buy = 2.1 * leverage
+
+# Margin call configuration
+MARGIN_CALLS = [
+    (5, 1.1), (5, 2.2), (6, 3.3), (5, 8.25), (6, 20.625),
+    (6, 45.375), (7, 95.2875), (7, 171.5175), (7, 343.035), (7, 617.463)
+]  
+
+TAKE_PROFIT_PERCENTAGE = 0.015  # 1.5% take profit
+MIN_NOTIONAL = 5  # Binance minimum order size ($5)
+
+# Fetch available futures symbols
+def get_available_symbols():
+    exchange_info = client.futures_exchange_info()
+    return [s['symbol'] for s in exchange_info['symbols'] if s['contractType'] == 'PERPETUAL' and s['status'] == 'TRADING']
+
+# Allow user to select tradable symbols
+def get_user_symbol_choices(symbols):
+    print("\n📌 Available Symbols:")
+    for i, sym in enumerate(symbols, start=1):
+        print(f"{i}. {sym}")
+
+    selected_indices = input("\nEnter numbers of symbols to trade (comma-separated): ")
+    selected_indices = [int(i.strip()) - 1 for i in selected_indices.split(",") if i.strip().isdigit()]
+    
+    return [symbols[i] for i in selected_indices if 0 <= i < len(symbols)]
+
+# Get trading pair precision, minQty, and minNotional
+def get_symbol_details(symbol):
+    exchange_info = client.futures_exchange_info()
+    for s in exchange_info['symbols']:
+        if s['symbol'] == symbol:
+            min_qty, step_size, min_notional = 0.001, 0.001, 5  # Defaults
+            for filter in s['filters']:
+                if filter['filterType'] == 'LOT_SIZE':
+                    min_qty = float(filter['minQty'])
+                    precision = int(filter['stepSize'].find('1') - 1)
+                if filter['filterType'] == 'MIN_NOTIONAL':
+                    min_notional = float(filter['notional'])
+            return precision, min_qty, min_notional
+    return 0, 0.001, 5  # Default values
+
+# Get current symbol price
+def get_symbol_price(symbol):
+    return float(client.futures_symbol_ticker(symbol=symbol)['price'])
+
+# Set leverage for trading
+def set_leverage(symbol, leverage=LEVERAGE):
+    """Set leverage before placing trades."""
+    try:
+        response = client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        print(f"Leverage set to {response['leverage']}x for {symbol}")
+    except BinanceAPIException as e:
+        print(f"Error setting leverage: {e}")
+
+# Place buy order with leverage
+def place_buy_order(symbol, amount, price):
+    """Place a leveraged buy order."""
+    set_leverage(symbol, LEVERAGE)  # Ensure leverage is set
+
+    # Get precision and min quantity
+    precision, min_qty, min_notional = get_symbol_details(symbol)
+
+    # Calculate leveraged quantity
+    order_value = amount * LEVERAGE
+    if order_value < MIN_NOTIONAL:
+        print(f"⚠️ Order value too low ({order_value}). Adjusting to min value.")
+        order_value = MIN_NOTIONAL  # Set to at least $5
+
+    quantity = order_value / price
+    quantity = round(quantity, precision)
+
+    # Ensure quantity is valid
+    if quantity < min_qty:
+        print(f"⚠️ Invalid quantity: {quantity} (Min: {min_qty}) - Adjusting to minQty")
+        quantity = min_qty
+
+    try:
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=SIDE_BUY,
+            type=ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        print(f"✅ Placed leveraged buy order: {order}")
+        return order
+    except BinanceAPIException as e:
+        print(f"❌ Error placing order: {e}")
+        return None
+
+# Monitor market and execute margin calls or take profit
+def monitor_market(symbol):
+    """Monitor market and execute trades based on price movement."""
+    initial_price = get_symbol_price(symbol)
+    print(f"📈 Monitoring {symbol} - Initial price: {initial_price}")
+
+    # Place first buy
+    place_buy_order(symbol, FIRST_BUY_AMOUNT, initial_price)
+    
+    buy_levels = [initial_price]  # Store buy prices
+    total_invested = [FIRST_BUY_AMOUNT]  # Track total invested per level
+
+    margin_call_index = 0  # Track margin call stage
+
+    while margin_call_index < len(MARGIN_CALLS):
+        time.sleep(10)  # Check every 10 seconds
+        current_price = get_symbol_price(symbol)
+        print(f"📊 {symbol} Price: {current_price}")
+
+        # Check for take profit on previous buys
+        for i, buy_price in enumerate(buy_levels):
+            take_profit_price = buy_price * (1 + TAKE_PROFIT_PERCENTAGE)
+            if current_price >= take_profit_price:
+                print(f"💰 {symbol} Take profit triggered at {current_price}")
+                try:
+                    quantity = total_invested[i] * LEVERAGE / buy_price
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_SELL,
+                        type=ORDER_TYPE_MARKET,
+                        quantity=quantity
+                    )
+                    print(f"✅ {symbol} Sold at {current_price}")
+                    buy_levels[i] = None  # Mark as sold
+                except BinanceAPIException as e:
+                    print(f"❌ {symbol} Error selling: {e}")
+
+        # Trigger margin calls
+        if margin_call_index < len(MARGIN_CALLS):
+            drop_percentage, buy_quantity = MARGIN_CALLS[margin_call_index]
+            trigger_price = buy_levels[-1] * (1 - (drop_percentage / 100))
+
+            if current_price <= trigger_price:
+                print(f"🔻 {symbol} Margin call {margin_call_index + 1}: Buying {buy_quantity} at {current_price}")
+                place_buy_order(symbol, buy_quantity, current_price)
+                buy_levels.append(current_price)
+                total_invested.append(buy_quantity)
+                margin_call_index += 1
+
+# Main execution
+if __name__ == "__main__":
+    available_symbols_data = get_available_symbols()
+    selected_symbols = get_user_symbol_choices(available_symbols_data)
+
+    for symbol in selected_symbols:
+        monitor_market(symbol)
