@@ -14,7 +14,7 @@ client = Client(API_KEY, API_SECRET)
 
 # 🚀 User-defined parameters
 LEVERAGE = 10  # Fixed leverage (10x)
-FIRST_BUY_AMOUNT = 9.1 * LEVERAGE  # First buy = 9.1 * leverage
+FIRST_BUY_AMOUNT = 3.1 * LEVERAGE  # First buy = 3.1 * leverage
 
 # Margin call configuration
 MARGIN_CALLS = [
@@ -30,7 +30,7 @@ MARGIN_CALLS = [
     (7, 617.463),  # 61% drop, buy 617.463 units
 ]  
 
-TAKE_PROFIT_PERCENTAGE = 0.02  # 2% take profit
+TAKE_PROFIT_PERCENTAGE = 0.015  # 1.5% take profit
 MIN_NOTIONAL = 5  # Binance minimum order size ($5)
 
 # Fetch available futures symbols
